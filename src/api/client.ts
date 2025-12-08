@@ -1,6 +1,7 @@
 /**
  * API Client
  * HTTP client for communicating with the Qari backend API
+ * Falls back to HuggingFace ML inference if backend is unavailable
  */
 
 import axios, { AxiosInstance, AxiosError } from 'axios';
@@ -11,10 +12,12 @@ import {
     QuickAnalysisResponse,
     ErrorResponse,
 } from './types';
+import { huggingFaceService } from './huggingface';
 
 // Get API base URL from environment variable, fallback to localhost
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 const API_TIMEOUT = parseInt(import.meta.env.VITE_API_TIMEOUT || '30000');
+const USE_HUGGINGFACE_FALLBACK = import.meta.env.VITE_USE_HUGGINGFACE !== 'false';
 
 class QariApiClient {
     private client: AxiosInstance;
@@ -40,6 +43,7 @@ class QariApiClient {
 
     /**
      * Analyze a recitation recording
+     * Falls back to HuggingFace if backend is unavailable
      */
     async analyzeRecording(
         userId: string,
@@ -48,30 +52,40 @@ class QariApiClient {
         ayah?: number,
         mode: 'short' | 'long' = 'short'
     ): Promise<RecitationAnalysisResponse> {
-        const formData = new FormData();
-        formData.append('user_id', userId);
-        formData.append('audio_file', audioFile);
-        formData.append('mode', mode);
+        try {
+            const formData = new FormData();
+            formData.append('user_id', userId);
+            formData.append('audio_file', audioFile);
+            formData.append('mode', mode);
 
-        if (surah !== undefined) {
-            formData.append('surah', surah.toString());
-        }
-        if (ayah !== undefined) {
-            formData.append('ayah', ayah.toString());
-        }
-
-        const response = await this.client.post<RecitationAnalysisResponse>(
-            '/api/v1/recordings/analyze',
-            formData,
-            {
-                headers: {
-                    'Content-Type': 'multipart/form-data',
-                },
+            if (surah !== undefined) {
+                formData.append('surah', surah.toString());
             }
-        );
+            if (ayah !== undefined) {
+                formData.append('ayah', ayah.toString());
+            }
 
-        return response.data;
+            const response = await this.client.post<RecitationAnalysisResponse>(
+                '/api/v1/recordings/analyze',
+                formData,
+                {
+                    headers: {
+                        'Content-Type': 'multipart/form-data',
+                    },
+                }
+            );
+
+            return response.data;
+        } catch (error) {
+            // Fallback to HuggingFace if enabled
+            if (USE_HUGGINGFACE_FALLBACK && surah !== undefined && ayah !== undefined) {
+                console.warn('Backend unavailable, falling back to HuggingFace ML inference');
+                return huggingFaceService.analyzeFromBlob(audioFile, surah, ayah);
+            }
+            throw error;
+        }
     }
+
 
     /**
      * Quick analysis for repetition loop
