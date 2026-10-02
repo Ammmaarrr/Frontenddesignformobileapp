@@ -1,6 +1,8 @@
-import { useState, useRef, useEffect } from 'react';
-import { ArrowLeft, Mic, Square, Play } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { ArrowLeft, Mic, Square, Play, AlertCircle } from 'lucide-react';
 import { RecitationResult } from '../App';
+import { useAudioRecorder } from '../hooks/useAudioRecorder';
+import { apiService } from '../services/api';
 
 interface RecordingScreenProps {
   surah: number;
@@ -13,108 +15,83 @@ type RecordingState = 'idle' | 'recording' | 'recorded' | 'analyzing';
 
 export function RecordingScreen({ surah, ayah, onAnalysisComplete, onBack }: RecordingScreenProps) {
   const [recordingState, setRecordingState] = useState<RecordingState>('idle');
-  const [recordingTime, setRecordingTime] = useState(0);
   const [waveformBars, setWaveformBars] = useState<number[]>(Array(40).fill(0.1));
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
-  const animationRef = useRef<NodeJS.Timeout | null>(null);
+  const [apiError, setApiError] = useState<string | null>(null);
 
+  const {
+    isRecording,
+    recordedBlob,
+    recordingTime,
+    startRecording: startAudioRecording,
+    stopRecording: stopAudioRecording,
+    resetRecording,
+    playRecording,
+    isPlaying,
+    error: recorderError,
+    audioLevel,
+  } = useAudioRecorder({
+    maxDuration: 12,
+    onRecordingComplete: () => {
+      setRecordingState('recorded');
+    },
+  });
+
+  // Update waveform based on audio level
   useEffect(() => {
-    if (recordingState === 'recording') {
-      // Start timer
-      timerRef.current = setInterval(() => {
-        setRecordingTime(prev => {
-          if (prev >= 12) {
-            handleStopRecording();
-            return 12;
-          }
-          return prev + 0.1;
-        });
-      }, 100);
-
-      // Animate waveform
-      animationRef.current = setInterval(() => {
-        setWaveformBars(prev => 
-          prev.map(() => Math.random() * 0.8 + 0.2)
+    if (isRecording) {
+      const interval = setInterval(() => {
+        setWaveformBars(prev =>
+          prev.map(() => Math.random() * audioLevel * 1.5 + 0.1)
         );
       }, 100);
-    } else {
-      if (timerRef.current) clearInterval(timerRef.current);
-      if (animationRef.current) clearInterval(animationRef.current);
-      if (recordingState === 'idle') {
-        setWaveformBars(Array(40).fill(0.1));
-        setRecordingTime(0);
-      }
+      return () => clearInterval(interval);
+    } else if (recordingState === 'idle') {
+      setWaveformBars(Array(40).fill(0.1));
     }
+  }, [isRecording, audioLevel, recordingState]);
 
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-      if (animationRef.current) clearInterval(animationRef.current);
-    };
-  }, [recordingState]);
-
-  const handleStartRecording = () => {
+  const handleStartRecording = async () => {
+    setApiError(null);
     setRecordingState('recording');
-    setRecordingTime(0);
+    await startAudioRecording();
   };
 
   const handleStopRecording = () => {
+    stopAudioRecording();
     setRecordingState('recorded');
     setWaveformBars(prev => prev.map(v => v * 0.5));
   };
 
-  const handleAnalyze = () => {
+  const handleAnalyze = async () => {
+    if (!recordedBlob) {
+      setApiError('No recording available');
+      return;
+    }
+
     setRecordingState('analyzing');
-    
-    // Simulate API call and return mock result
-    setTimeout(() => {
-      const mockResult: RecitationResult = {
-        matched_ayah: {
-          surah: surah,
-          ayah: ayah,
-          confidence: 0.92
-        },
-        errors: [
-          {
-            type: 'substituted_letter',
-            letter: 'ق',
-            expected: 'ق',
-            detected: 'ك',
-            start_time: 0.56,
-            end_time: 0.68,
-            confidence: 0.85,
-            suggestion: 'Push back of tongue - listen and repeat',
-            correction_audio_url: '#'
-          },
-          {
-            type: 'madd_short',
-            start_time: 1.2,
-            end_time: 1.35,
-            confidence: 0.78,
-            suggestion: 'Extend the madd for 2 counts (approximately 0.5 seconds)',
-            correction_audio_url: '#'
-          },
-          {
-            type: 'ghunnah_missing',
-            letter: 'ن',
-            start_time: 2.1,
-            end_time: 2.25,
-            confidence: 0.82,
-            suggestion: 'Add nasal sound (ghunnah) for noon with tanween',
-            correction_audio_url: '#'
-          }
-        ],
-        overall_score: 0.78,
-        recommendation: 'Good effort! Focus on the qaf pronunciation and madd lengths. Practice these 2-3 times.'
-      };
-      
-      onAnalysisComplete(mockResult);
-    }, 3000);
+    setApiError(null);
+
+    try {
+      const result = await apiService.analyzeRecitation(recordedBlob, surah, ayah);
+      onAnalysisComplete(result);
+    } catch (error) {
+      console.error('Analysis error:', error);
+      setApiError(error instanceof Error ? error.message : 'Failed to analyze recitation');
+      setRecordingState('recorded');
+    }
   };
 
   const handlePlayback = () => {
-    // Play recorded audio
-    console.log('Playing back recording...');
+    playRecording();
   };
+
+  const handleRecordAgain = () => {
+    resetRecording();
+    setRecordingState('idle');
+    setApiError(null);
+  };
+
+  const displayError = apiError || recorderError;
 
   return (
     <div className="min-h-screen p-6 flex flex-col">
@@ -233,10 +210,11 @@ export function RecordingScreen({ surah, ayah, onAnalysisComplete, onBack }: Rec
           <>
             <button
               onClick={handlePlayback}
-              className="w-full bg-white text-emerald-900 p-4 rounded-xl shadow-sm hover:shadow-md transition-all flex items-center justify-center gap-3 border-2 border-emerald-200"
+              disabled={isPlaying}
+              className="w-full bg-white text-emerald-900 p-4 rounded-xl shadow-sm hover:shadow-md transition-all flex items-center justify-center gap-3 border-2 border-emerald-200 disabled:opacity-50"
             >
               <Play className="w-5 h-5 text-emerald-600" />
-              <span>Play Recording</span>
+              <span>{isPlaying ? 'Playing...' : 'Play Recording'}</span>
             </button>
             <button
               onClick={handleAnalyze}
@@ -245,12 +223,23 @@ export function RecordingScreen({ surah, ayah, onAnalysisComplete, onBack }: Rec
               Analyze Recitation
             </button>
             <button
-              onClick={() => setRecordingState('idle')}
+              onClick={handleRecordAgain}
               className="w-full bg-white text-emerald-900 p-4 rounded-xl shadow-sm hover:shadow-md transition-all border-2 border-emerald-200"
             >
               Record Again
             </button>
           </>
+        )}
+
+        {/* Error Display */}
+        {displayError && (
+          <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="text-red-700 font-medium">Error</p>
+              <p className="text-red-600 text-sm">{displayError}</p>
+            </div>
+          </div>
         )}
       </div>
     </div>
